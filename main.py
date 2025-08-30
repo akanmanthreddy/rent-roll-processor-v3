@@ -1,28 +1,15 @@
-import sys
-print(f"Python version: {sys.version}", file=sys.stderr)
-print("Starting imports...", file=sys.stderr)
-
 import functions_framework
 import json
 import io
 import logging
 from flask import make_response
-from datetime import datetime
 import pandas as pd
 
-print("Basic imports successful", file=sys.stderr)
-
-# Import our modularized functions
-try:
-    from src.data_loader import load_and_prepare_dataframe
-    from src.processing import process_rent_roll_vectorized
-    print("Module imports successful", file=sys.stderr)
-except Exception as e:
-    print(f"Module import failed: {e}", file=sys.stderr)
-    raise
+from src.data_loader import load_and_prepare_dataframe
 from src.processing import process_rent_roll_vectorized
+from src.validator import validate_rent_roll, generate_validation_summary
 
-# --- Logging Setup ---
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -30,14 +17,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# --- Main HTTP Function ---
-
 @functions_framework.http
 def process_rent_roll_http(request):
     """
-    HTTP Cloud Function to process an uploaded rent roll file (CSV or Excel).
-    This function now acts as an orchestrator, calling specialized modules.
+    HTTP Cloud Function to process an uploaded rent roll file.
+    Accepts CSV or Excel files and returns processed JSON data with validation.
     """
+    
+    # Handle CORS preflight requests
     if request.method == 'OPTIONS':
         headers = {
             'Access-Control-Allow-Origin': '*',
@@ -50,6 +37,11 @@ def process_rent_roll_http(request):
     headers = {'Access-Control-Allow-Origin': '*'}
 
     try:
+        # Check if this is a validation-only request
+        validate_only = request.args.get('validate_only', 'false').lower() == 'true'
+        include_validation = request.args.get('include_validation', 'true').lower() == 'true'
+        
+        # Validate request has a file
         if 'file' not in request.files:
             return (json.dumps({'error': 'No file part in the request'}), 400, headers)
 
@@ -58,47 +50,54 @@ def process_rent_roll_http(request):
             return (json.dumps({'error': 'No file selected for uploading'}), 400, headers)
 
         logger.info(f"Processing file: {file.filename}")
+        
+        # Read file into memory
         file_buffer = io.BytesIO(file.read())
         
-        # Log file size
-        file_size = file_buffer.getbuffer().nbytes
-        logger.info(f"File size: {file_size} bytes")
-        
-        if file_size == 0:
-            return (json.dumps({'error': 'Empty file uploaded'}), 400, headers)
-
-        # --- Main Processing Pipeline ---
-        # Each step now calls a function from a dedicated module
+        # Process the file
         raw_df = load_and_prepare_dataframe(file_buffer, file.filename)
-        logger.info(f"Raw DataFrame shape: {raw_df.shape}")
-        logger.info(f"Raw DataFrame columns: {list(raw_df.columns)[:10]}")  # Log first 10 columns
-        
-        if raw_df.empty:
-            return (json.dumps({'error': 'No data found in file after parsing'}), 400, headers)
-        
         processed_df = process_rent_roll_vectorized(raw_df)
-        logger.info(f"Processed DataFrame shape: {processed_df.shape}")
-        # --- End of Pipeline ---
-
+        
         if processed_df.empty:
-            return (json.dumps({'error': 'No units found after processing', 'details': 'The file was parsed but no valid unit data was found'}), 400, headers)
-
+            return (json.dumps({'error': 'No valid data found after processing'}), 400, headers)
+        
+        # Run validation
+        validation_results = validate_rent_roll(processed_df)
+        
+        # If validation-only mode, return just the validation results
+        if validate_only:
+            validation_summary = generate_validation_summary(validation_results)
+            response_data = {
+                'validation': validation_results,
+                'summary': validation_summary
+            }
+            response = make_response(json.dumps(response_data, indent=2))
+            response.headers['Content-Type'] = 'application/json; charset=utf-8'
+            response.headers.update(headers)
+            return response
+        
         logger.info(f"Successfully processed {len(processed_df)} units.")
 
-        # Prepare JSON response
-        # Convert datetime columns to ISO format string for JSON serialization
+        # Convert datetime columns for JSON serialization
         for col in processed_df.select_dtypes(include=['datetime64[ns]']).columns:
             processed_df[col] = processed_df[col].apply(lambda x: x.isoformat() if pd.notna(x) else None)
 
-        # Check if DataFrame has data before converting to JSON
-        if len(processed_df) == 0:
-            result_json = "[]"
+        # Prepare response
+        if include_validation:
+            # Include both data and validation results
+            response_data = {
+                'data': json.loads(processed_df.to_json(orient='records')),
+                'validation': validation_results,
+                'row_count': len(processed_df),
+                'column_count': len(processed_df.columns)
+            }
         else:
-            result_json = processed_df.to_json(orient='records', indent=2)
-
-        response = make_response(result_json)
-        response.headers['Content-Type'] = 'application/json; charset=utf-8'  # FIXED: Proper header setting
-        response.headers.update(headers)  # FIXED: Use update() instead of assignment
+            # Just return the data (original behavior)
+            response_data = json.loads(processed_df.to_json(orient='records'))
+        
+        response = make_response(json.dumps(response_data, indent=2))
+        response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        response.headers.update(headers)
         return response
 
     except ValueError as ve:
