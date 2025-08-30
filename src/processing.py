@@ -6,15 +6,9 @@ Handles data cleaning, pivoting, and transformation.
 import pandas as pd
 import numpy as np
 import logging
+from src.config import PRIMARY_RECORD_COLS, NO_FORWARD_FILL_COLS, FILTER_PATTERNS
 
 logger = logging.getLogger(__name__)
-
-# Columns that define a primary unit record
-PRIMARY_RECORD_COLS = [
-    'unit', 'unit_type', 'sq_ft', 'resident_code', 'resident_name',
-    'market_rent', 'resident_deposit', 'other_deposit', 'move_in',
-    'lease_expiration', 'move_out', 'balance'
-]
 
 
 def clean_and_convert_to_numeric(series: pd.Series) -> pd.Series:
@@ -68,14 +62,12 @@ def process_rent_roll_vectorized(df: pd.DataFrame) -> pd.DataFrame:
     
     logger.info(f"Starting processing with {len(df)} rows")
     
-    # Forward-fill primary record information (but NOT move_out date or dates for vacant units)
-    # Only forward-fill within the same resident's records
-    cols_to_ffill = [col for col in PRIMARY_RECORD_COLS if col in df.columns and col != 'move_out']
+    # Forward-fill primary record information (but NOT columns in NO_FORWARD_FILL_COLS)
+    cols_to_ffill = [col for col in PRIMARY_RECORD_COLS if col in df.columns and col not in NO_FORWARD_FILL_COLS]
     
     # Create a group identifier based on unit and resident to prevent forward-fill across different tenants
     if 'resident_name' in df.columns:
         # Create groups where forward-fill should stop at boundaries
-        # When resident_name changes (including to/from null), start a new group
         df['fill_group'] = (df['unit'] + '_' + df['resident_name'].fillna('VACANT')).ne(
             (df['unit'] + '_' + df['resident_name'].fillna('VACANT')).shift()).cumsum()
         
@@ -94,7 +86,7 @@ def process_rent_roll_vectorized(df: pd.DataFrame) -> pd.DataFrame:
             df[cols_to_ffill] = df[cols_to_ffill].ffill()
             logger.info(f"Forward-filled {len(cols_to_ffill)} columns (excluding dates)")
     
-    # Keep track of all primary columns for later (including move_out)
+    # Keep track of all primary columns for later (including those in NO_FORWARD_FILL_COLS)
     available_primary_cols = [col for col in PRIMARY_RECORD_COLS if col in df.columns]
 
     # Validate required columns
@@ -107,17 +99,17 @@ def process_rent_roll_vectorized(df: pd.DataFrame) -> pd.DataFrame:
     # Convert unit to string for string operations
     df['unit'] = df['unit'].astype(str)
     
-    # Remove separator rows (visual formatting rows in some reports)
-    df = df[~df['unit'].str.contains(',,,,,', na=False, regex=False)]
+    # Remove separator rows using patterns from config
+    for pattern in FILTER_PATTERNS:
+        if ',' in pattern:  # Separator pattern
+            df = df[~df['unit'].str.contains(pattern, na=False, regex=False)]
     
     # IMPORTANT: Capture ALL units first (including vacant ones)
-    # Get unique units with their details before filtering for charges
     all_units = df.drop_duplicates(subset=['unit'], keep='first')
     unit_info = all_units[['unit'] + [col for col in available_primary_cols if col in all_units.columns and col != 'unit']]
     logger.info(f"Found {len(unit_info)} unique units (including vacant)")
     
     # Now filter for rows with charges (for the pivot table)
-    # Only filter rows that have charge_code and amount for pivoting
     charge_rows = df.copy()
     
     # Check if charge_code exists
@@ -125,9 +117,11 @@ def process_rent_roll_vectorized(df: pd.DataFrame) -> pd.DataFrame:
         charge_rows['charge_code'] = charge_rows['charge_code'].astype(str)
         # Remove rows without charge codes
         charge_rows = charge_rows.dropna(subset=['charge_code'])
-        # Remove total/summary rows
-        charge_rows = charge_rows[charge_rows['charge_code'].str.lower() != 'total']
-        charge_rows = charge_rows[~charge_rows['charge_code'].str.lower().str.contains('summary', na=False)]
+        # Remove total/summary rows using patterns from config
+        for pattern in FILTER_PATTERNS:
+            if pattern in ['total', 'summary']:
+                charge_rows = charge_rows[~charge_rows['charge_code'].str.lower().str.contains(pattern, na=False)]
+        
         logger.info(f"Found {len(charge_rows)} rows with charges")
         
         # Process amount column if it exists
@@ -146,19 +140,15 @@ def process_rent_roll_vectorized(df: pd.DataFrame) -> pd.DataFrame:
                 ).reset_index()
                 logger.info(f"Created pivot table with {len(pivot_df)} units with charges")
             else:
-                # No charges found, create empty pivot
                 pivot_df = pd.DataFrame({'unit': unit_info['unit'].unique()})
                 logger.warning("No valid charges found")
         else:
-            # No amount column, just get unique units
             pivot_df = pd.DataFrame({'unit': unit_info['unit'].unique()})
     else:
-        # No charge_code column at all
         pivot_df = pd.DataFrame({'unit': unit_info['unit'].unique()})
         logger.warning("No charge_code column found")
     
     # Merge ALL unit information with the pivot table
-    # This ensures vacant units are included even if they have no charges
     final_df = pd.merge(unit_info, pivot_df, on='unit', how='left')
     
     # For units not in pivot (vacant units), fill charge columns with 0
