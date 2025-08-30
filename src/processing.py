@@ -1,21 +1,26 @@
+"""
+Processing module for rent roll data.
+Handles data cleaning, pivoting, and transformation.
+"""
+
 import pandas as pd
 import numpy as np
 import logging
-from typing import List
 
 logger = logging.getLogger(__name__)
 
-# This list can be shared or moved to a config module later
+# Columns that define a primary unit record
 PRIMARY_RECORD_COLS = [
     'unit', 'unit_type', 'sq_ft', 'resident_code', 'resident_name',
     'market_rent', 'resident_deposit', 'other_deposit', 'move_in',
     'lease_expiration', 'move_out', 'balance'
 ]
 
+
 def clean_and_convert_to_numeric(series: pd.Series) -> pd.Series:
     """
-    Cleans a series by removing currency symbols, commas, and handling parentheses
-    for negative numbers, then converts it to a numeric type.
+    Cleans currency and numeric data.
+    Handles $, commas, parentheses for negatives.
     """
     if series.empty:
         return series
@@ -29,89 +34,122 @@ def clean_and_convert_to_numeric(series: pd.Series) -> pd.Series:
     )
     return pd.to_numeric(cleaned, errors='coerce')
 
+
 def optimize_memory_usage(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Optimizes DataFrame memory usage by downcasting numeric types and converting
-    low-cardinality object columns to 'category' type.
+    Optimizes DataFrame memory by downcasting types.
     """
-    logger.info(f"Initial memory usage: {df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
-
+    initial_memory = df.memory_usage(deep=True).sum() / 1024**2
+    
+    # Downcast numeric types
     for col in df.select_dtypes(include=['int64', 'float64']).columns:
-        df[col] = pd.to_numeric(df[col], downcast='integer')
-        df[col] = pd.to_numeric(df[col], downcast='float')
+        df[col] = pd.to_numeric(df[col], downcast='integer', errors='ignore')
+        df[col] = pd.to_numeric(df[col], downcast='float', errors='ignore')
 
+    # Convert low-cardinality strings to category
     for col in df.select_dtypes(include=['object']).columns:
-        if len(df[col].unique()) / len(df[col]) < 0.5:
+        if df[col].nunique() / len(df[col]) < 0.5:
             df[col] = df[col].astype('category')
 
-    logger.info(f"Optimized memory usage: {df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
+    final_memory = df.memory_usage(deep=True).sum() / 1024**2
+    logger.info(f"Memory optimized: {initial_memory:.2f}MB → {final_memory:.2f}MB")
+    
     return df
+
 
 def process_rent_roll_vectorized(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Processes the rent roll data using a fully vectorized approach.
+    Main processing function for rent roll data.
+    Cleans, pivots, and transforms the data.
     """
+    if df.empty:
+        logger.warning("Received empty DataFrame")
+        return pd.DataFrame()
+    
     logger.info(f"Starting processing with {len(df)} rows")
     
-    ffill_cols = [col for col in PRIMARY_RECORD_COLS if col in df.columns and col != 'move_out']
-    if ffill_cols:
-        df[ffill_cols] = df[ffill_cols].ffill()
-        logger.info(f"Forward-filled {len(ffill_cols)} columns (excluding move_out)")
+    # Forward-fill primary record information (but NOT move_out date)
+    # Move-out is tenant-specific and shouldn't be carried forward
+    cols_to_ffill = [col for col in PRIMARY_RECORD_COLS if col in df.columns and col != 'move_out']
+    if cols_to_ffill:
+        df[cols_to_ffill] = df[cols_to_ffill].ffill()
+        logger.info(f"Forward-filled {len(cols_to_ffill)} columns (excluding move_out)")
+    
+    # Keep track of all primary columns for later (including move_out)
+    available_primary_cols = [col for col in PRIMARY_RECORD_COLS if col in df.columns]
 
+    # Validate required columns
     if 'unit' not in df.columns or 'charge_code' not in df.columns:
-        logger.error(f"Missing required columns. Available columns: {list(df.columns)}")
-        raise ValueError("Required columns 'unit' or 'charge_code' not found in the data")
+        missing = []
+        if 'unit' not in df.columns:
+            missing.append('unit')
+        if 'charge_code' not in df.columns:
+            missing.append('charge_code')
+        raise ValueError(f"Required columns missing: {', '.join(missing)}")
     
-    # Log initial data state
-    logger.info(f"Rows before cleaning: {len(df)}")
+    # Clean data
+    initial_rows = len(df)
     
+    # Remove rows without unit or charge_code
     df = df.dropna(subset=['unit', 'charge_code'])
-    logger.info(f"Rows after dropping NaN in unit/charge_code: {len(df)}")
+    logger.info(f"Removed {initial_rows - len(df)} rows with missing unit/charge_code")
     
-    # Convert unit column to string before using string operations
+    # Convert to string for string operations
     df['unit'] = df['unit'].astype(str)
-    df = df[~df['unit'].str.contains(r',,,,,,,,,,,,,', na=False, regex=False)]
-    logger.info(f"Rows after removing separator rows: {len(df)}")
-    
-    # Convert charge_code to string before comparison
     df['charge_code'] = df['charge_code'].astype(str)
+    
+    # Remove separator rows (visual formatting rows in some reports)
+    df = df[~df['unit'].str.contains(',,,,,', na=False, regex=False)]
+    
+    # Remove total/summary rows
     df = df[df['charge_code'].str.lower() != 'total']
-    logger.info(f"Rows after removing 'total' rows: {len(df)}")
+    df = df[~df['charge_code'].str.lower().str.contains('summary', na=False)]
+    
+    logger.info(f"Rows after cleaning: {len(df)}")
 
+    # Process amount column
     if 'amount' not in df.columns:
-        logger.error(f"'amount' column not found. Available columns: {list(df.columns)}")
         raise ValueError("'amount' column not found in the data")
-        
+    
     df['amount'] = clean_and_convert_to_numeric(df['amount'])
     df = df.dropna(subset=['amount'])
-    logger.info(f"Rows after cleaning amount column: {len(df)}")
     
     if df.empty:
-        logger.warning("DataFrame is empty after cleaning")
+        logger.warning("No valid data after cleaning")
         return pd.DataFrame()
 
+    # Pivot charge codes into columns
     pivot_df = df.pivot_table(
         index='unit',
         columns='charge_code',
         values='amount',
-        aggfunc='sum'
+        aggfunc='sum',
+        fill_value=0
     ).reset_index()
-    logger.info(f"Pivoted DataFrame has {len(pivot_df)} units")
+    
+    logger.info(f"Created pivot table with {len(pivot_df)} units")
 
-    available_cols = [col for col in ffill_cols if col in df.columns and col != 'unit']
-    if available_cols:
-        unit_details = df.groupby('unit')[available_cols].last().reset_index()
-        final_df = pd.merge(unit_details, pivot_df, on='unit', how='left')
+    # Get unit details (last known values for each unit)
+    # Use available_primary_cols which includes move_out
+    detail_cols = [col for col in available_primary_cols if col in df.columns and col != 'unit']
+    if detail_cols:
+        unit_details = df.groupby('unit')[detail_cols].last().reset_index()
+        final_df = pd.merge(unit_details, pivot_df, on='unit', how='outer')
     else:
         final_df = pivot_df
 
+    # Clean column names
     final_df.columns = [str(col).lower().strip().replace(' ', '_') for col in final_df.columns]
 
-    for col in final_df.select_dtypes(include=['object']).columns:
-        if 'date' in col or 'move' in col or 'lease' in col:
+    # Convert date columns
+    date_cols = [col for col in final_df.columns 
+                 if any(keyword in col for keyword in ['date', 'move', 'lease', 'expir'])]
+    for col in date_cols:
+        if col in final_df.columns:
             final_df[col] = pd.to_datetime(final_df[col], errors='coerce')
 
+    # Optimize memory
     final_df = optimize_memory_usage(final_df)
     
-    logger.info(f"Final DataFrame has {len(final_df)} rows and {len(final_df.columns)} columns")
+    logger.info(f"Processing complete: {len(final_df)} units, {len(final_df.columns)} columns")
     return final_df
