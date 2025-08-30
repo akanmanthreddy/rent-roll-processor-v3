@@ -109,9 +109,9 @@ def validate_rent_roll(df: pd.DataFrame) -> Dict[str, Any]:
     
     # Calculate statistics
     if 'occupancy_status' in df.columns:
-        total_units = len(df)
-        vacant_units = (df['occupancy_status'] == 'Vacant').sum()
-        occupied_units = (df['occupancy_status'] == 'Occupied').sum()
+        total_units = int(len(df))
+        vacant_units = int((df['occupancy_status'] == 'Vacant').sum())
+        occupied_units = int((df['occupancy_status'] == 'Occupied').sum())
         
         validation_results['statistics'] = {
             'total_units': total_units,
@@ -122,8 +122,8 @@ def validate_rent_roll(df: pd.DataFrame) -> Dict[str, Any]:
     
     # Add rent statistics if available
     if 'market_rent' in df.columns:
-        validation_results['statistics']['avg_market_rent'] = round(df['market_rent'].mean(), 2)
-        validation_results['statistics']['total_market_rent'] = round(df['market_rent'].sum(), 2)
+        validation_results['statistics']['avg_market_rent'] = float(round(df['market_rent'].mean(), 2))
+        validation_results['statistics']['total_market_rent'] = float(round(df['market_rent'].sum(), 2))
     
     # Ensure score doesn't go below 0
     validation_results['data_quality_score'] = max(0, validation_results['data_quality_score'])
