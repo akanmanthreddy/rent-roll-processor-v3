@@ -79,65 +79,74 @@ def process_rent_roll_vectorized(df: pd.DataFrame) -> pd.DataFrame:
     available_primary_cols = [col for col in PRIMARY_RECORD_COLS if col in df.columns]
 
     # Validate required columns
-    if 'unit' not in df.columns or 'charge_code' not in df.columns:
-        missing = []
-        if 'unit' not in df.columns:
-            missing.append('unit')
-        if 'charge_code' not in df.columns:
-            missing.append('charge_code')
-        raise ValueError(f"Required columns missing: {', '.join(missing)}")
+    if 'unit' not in df.columns:
+        raise ValueError("Required column 'unit' not found in the data")
     
     # Clean data
     initial_rows = len(df)
     
-    # Remove rows without unit or charge_code
-    df = df.dropna(subset=['unit', 'charge_code'])
-    logger.info(f"Removed {initial_rows - len(df)} rows with missing unit/charge_code")
-    
-    # Convert to string for string operations
+    # Convert unit to string for string operations
     df['unit'] = df['unit'].astype(str)
-    df['charge_code'] = df['charge_code'].astype(str)
     
     # Remove separator rows (visual formatting rows in some reports)
     df = df[~df['unit'].str.contains(',,,,,', na=False, regex=False)]
     
-    # Remove total/summary rows
-    df = df[df['charge_code'].str.lower() != 'total']
-    df = df[~df['charge_code'].str.lower().str.contains('summary', na=False)]
+    # IMPORTANT: Capture ALL units first (including vacant ones)
+    # Get unique units with their details before filtering for charges
+    all_units = df.drop_duplicates(subset=['unit'], keep='first')
+    unit_info = all_units[['unit'] + [col for col in available_primary_cols if col in all_units.columns and col != 'unit']]
+    logger.info(f"Found {len(unit_info)} unique units (including vacant)")
     
-    logger.info(f"Rows after cleaning: {len(df)}")
-
-    # Process amount column
-    if 'amount' not in df.columns:
-        raise ValueError("'amount' column not found in the data")
+    # Now filter for rows with charges (for the pivot table)
+    # Only filter rows that have charge_code and amount for pivoting
+    charge_rows = df.copy()
     
-    df['amount'] = clean_and_convert_to_numeric(df['amount'])
-    df = df.dropna(subset=['amount'])
-    
-    if df.empty:
-        logger.warning("No valid data after cleaning")
-        return pd.DataFrame()
-
-    # Pivot charge codes into columns
-    pivot_df = df.pivot_table(
-        index='unit',
-        columns='charge_code',
-        values='amount',
-        aggfunc='sum',
-        fill_value=0
-    ).reset_index()
-    
-    logger.info(f"Created pivot table with {len(pivot_df)} units")
-
-    # Get unit details (last known values for each unit)
-    # Use available_primary_cols which includes move_out
-    detail_cols = [col for col in available_primary_cols if col in df.columns and col != 'unit']
-    if detail_cols:
-        unit_details = df.groupby('unit')[detail_cols].last().reset_index()
-        final_df = pd.merge(unit_details, pivot_df, on='unit', how='outer')
+    # Check if charge_code exists
+    if 'charge_code' in charge_rows.columns:
+        charge_rows['charge_code'] = charge_rows['charge_code'].astype(str)
+        # Remove rows without charge codes
+        charge_rows = charge_rows.dropna(subset=['charge_code'])
+        # Remove total/summary rows
+        charge_rows = charge_rows[charge_rows['charge_code'].str.lower() != 'total']
+        charge_rows = charge_rows[~charge_rows['charge_code'].str.lower().str.contains('summary', na=False)]
+        logger.info(f"Found {len(charge_rows)} rows with charges")
+        
+        # Process amount column if it exists
+        if 'amount' in charge_rows.columns:
+            charge_rows['amount'] = clean_and_convert_to_numeric(charge_rows['amount'])
+            charge_rows = charge_rows.dropna(subset=['amount'])
+            
+            # Pivot charge codes into columns
+            if not charge_rows.empty:
+                pivot_df = charge_rows.pivot_table(
+                    index='unit',
+                    columns='charge_code',
+                    values='amount',
+                    aggfunc='sum',
+                    fill_value=0
+                ).reset_index()
+                logger.info(f"Created pivot table with {len(pivot_df)} units with charges")
+            else:
+                # No charges found, create empty pivot
+                pivot_df = pd.DataFrame({'unit': unit_info['unit'].unique()})
+                logger.warning("No valid charges found")
+        else:
+            # No amount column, just get unique units
+            pivot_df = pd.DataFrame({'unit': unit_info['unit'].unique()})
     else:
-        final_df = pivot_df
-
+        # No charge_code column at all
+        pivot_df = pd.DataFrame({'unit': unit_info['unit'].unique()})
+        logger.warning("No charge_code column found")
+    
+    # Merge ALL unit information with the pivot table
+    # This ensures vacant units are included even if they have no charges
+    final_df = pd.merge(unit_info, pivot_df, on='unit', how='left')
+    
+    # For units not in pivot (vacant units), fill charge columns with 0
+    charge_columns = [col for col in final_df.columns if col not in available_primary_cols and col != 'unit']
+    for col in charge_columns:
+        final_df[col] = final_df[col].fillna(0)
+    
     # Clean column names
     final_df.columns = [str(col).lower().strip().replace(' ', '_') for col in final_df.columns]
 
@@ -151,5 +160,16 @@ def process_rent_roll_vectorized(df: pd.DataFrame) -> pd.DataFrame:
     # Optimize memory
     final_df = optimize_memory_usage(final_df)
     
+    # Add occupancy status for clarity
+    if 'resident_name' in final_df.columns:
+        final_df['occupancy_status'] = final_df['resident_name'].apply(
+            lambda x: 'Vacant' if pd.isna(x) or str(x).strip() == '' else 'Occupied'
+        )
+    
     logger.info(f"Processing complete: {len(final_df)} units, {len(final_df.columns)} columns")
+    if 'occupancy_status' in final_df.columns:
+        vacant_count = (final_df['occupancy_status'] == 'Vacant').sum()
+        occupied_count = (final_df['occupancy_status'] == 'Occupied').sum()
+        logger.info(f"Units: {occupied_count} occupied, {vacant_count} vacant")
+    
     return final_df
