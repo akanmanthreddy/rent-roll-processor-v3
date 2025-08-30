@@ -18,65 +18,59 @@ logger = logging.getLogger(__name__)
 def find_header_and_data_start_excel(df: pd.DataFrame, format_info: dict = None) -> pd.DataFrame:
     """
     Identifies header rows and data section in an Excel DataFrame.
-    Adapts based on detected format.
+    RESTORING ORIGINAL LOGIC that searches for headers.
     """
     header_row_idx = -1
     
-    # Use format-specific markers if available
-    if format_info and format_info.get('profile'):
-        profile = format_info['profile']
-    else:
-        profile = DEFAULT_FORMAT_PROFILE
+    # Log what we're looking at
+    logger.info(f"Searching for headers in Excel file with {len(df)} rows")
+    for idx in range(min(10, len(df))):
+        row_str = ' '.join(str(val).lower() for val in df.iloc[idx].values if pd.notna(val))
+        logger.info(f"Row {idx}: {row_str[:100]}...")
     
-    header_markers = profile['header_markers']
-    section_markers = profile['section_markers']
-    has_two_row_header = profile.get('has_two_row_header', True)
-    
-    # Find the header row containing key fields
+    # ORIGINAL LOGIC: Find the header row containing key fields
     for idx, row in df.iterrows():
         row_str = ' '.join(str(val).lower() for val in row.values if pd.notna(val))
-        if any(all(keyword in row_str for keyword in marker.split()) for marker in header_markers):
+        # Check for the pattern that indicates headers
+        if all(keyword in row_str for keyword in ['unit', 'unit type', 'resident']):
             header_row_idx = idx
+            logger.info(f"Found header at row {idx}")
             break
     
     if header_row_idx == -1:
+        logger.error("Could not find header row in Excel file")
         raise ValueError("Could not find the primary header row in the Excel file.")
     
-    # Get header rows based on format
+    # Get two header rows (ORIGINAL LOGIC)
     header1 = df.iloc[header_row_idx].fillna('')
+    header2 = df.iloc[header_row_idx + 1].fillna('') if header_row_idx + 1 < len(df) else pd.Series()
     
-    if has_two_row_header:
-        # Two-row header
-        header2 = df.iloc[header_row_idx + 1].fillna('') if header_row_idx + 1 < len(df) else pd.Series()
-        combined_header = []
-        for i in range(len(header1)):
-            h1 = str(header1.iloc[i]).strip()
-            h2 = str(header2.iloc[i]).strip() if i < len(header2) else ''
-            if h1 and h2:
-                combined_header.append(f"{h1} {h2}".strip())
-            elif h1:
-                combined_header.append(h1)
-            else:
-                combined_header.append(h2 if h2 else f'column_{i}')
-    else:
-        # Single row header
-        combined_header = [str(val).strip() for val in header1]
+    # Combine headers (ORIGINAL LOGIC)
+    combined_header = []
+    for i in range(len(header1)):
+        h1 = str(header1.iloc[i]).strip()
+        h2 = str(header2.iloc[i]).strip() if i < len(header2) else ''
+        if h1 and h2:
+            combined_header.append(f"{h1} {h2}".strip())
+        elif h1:
+            combined_header.append(h1)
+        else:
+            combined_header.append(h2 if h2 else f'column_{i}')
     
     # Find data start (after section marker)
-    data_start_idx = header_row_idx + (2 if has_two_row_header else 1)
-    
-    for idx in range(data_start_idx, len(df)):
+    data_start_idx = header_row_idx + 2
+    for idx in range(header_row_idx + 2, len(df)):
         row_str = ' '.join(str(val).lower() for val in df.iloc[idx].values if pd.notna(val))
-        if any(marker in row_str for marker in section_markers):
+        if 'current/notice/vacant residents' in row_str:
             data_start_idx = idx + 1
+            logger.info(f"Found data section marker at row {idx}")
             break
     
     # Find data end (before summary sections)
     data_end_idx = len(df)
-    
     for idx in range(data_start_idx, len(df)):
         row_str = ' '.join(str(val).lower() for val in df.iloc[idx].values if pd.notna(val))
-        if any(marker in row_str for marker in DATA_END_MARKERS):
+        if 'summary groups' in row_str or 'future residents/applicants' in row_str:
             data_end_idx = idx
             break
     
@@ -84,7 +78,7 @@ def find_header_and_data_start_excel(df: pd.DataFrame, format_info: dict = None)
     new_df = df.iloc[data_start_idx:data_end_idx].reset_index(drop=True)
     new_df.columns = combined_header[:len(new_df.columns)]
     
-    # Normalize column names based on format
+    # Normalize column names
     new_df = normalize_column_names(new_df, format_info)
     
     logger.info(f"Extracted {len(new_df)} rows from Excel file")
@@ -103,20 +97,31 @@ def find_header_and_data_start_csv(file_buffer: io.BytesIO, format_info: dict = 
     header_start_idx = -1
     data_start_idx = -1
 
+    # Log first few lines to debug
+    logger.info("Searching for headers in CSV file...")
+    for i in range(min(10, len(lines))):
+        line = lines[i].decode('utf-8', errors='ignore').strip()
+        logger.info(f"Line {i}: {line[:100]}...")
+
     # ORIGINAL LOGIC: Find the line containing "Unit,Unit Type,Unit,Resident..."
     for i, line_bytes in enumerate(lines):
         line = line_bytes.decode('utf-8', errors='ignore').strip()
         # Check for the exact pattern that worked before
         if all(keyword in line.lower() for keyword in ['unit,', 'unit type,', 'resident,']):
             header_start_idx = i
+            logger.info(f"Found header at line {i}")
             break
 
     if header_start_idx == -1:
+        logger.error("Could not find header row with pattern ['unit,', 'unit type,', 'resident,']")
         raise ValueError("Could not find the primary header row in the file.")
 
     # ORIGINAL LOGIC: The header is composed of two lines
     header1 = lines[header_start_idx].decode('utf-8', errors='ignore').strip().split(',')
     header2 = lines[header_start_idx + 1].decode('utf-8', errors='ignore').strip().split(',') if header_start_idx + 1 < len(lines) else []
+
+    logger.info(f"Header row 1 has {len(header1)} columns. First 5: {header1[:5]}")
+    logger.info(f"Header row 2 has {len(header2)} columns. First 5: {header2[:5]}")
 
     # ORIGINAL LOGIC: Combine the two header lines into one
     combined_header = []
@@ -131,11 +136,14 @@ def find_header_and_data_start_csv(file_buffer: io.BytesIO, format_info: dict = 
         else:
             combined_header.append(h2)
 
+    logger.info(f"Combined header has {len(combined_header)} columns. First 5: {combined_header[:5]}")
+
     # ORIGINAL LOGIC: Data starts after the "Current/Notice/Vacant Residents" line
     for i in range(header_start_idx + 2, len(lines)):
         line = lines[i].decode('utf-8', errors='ignore').strip().lower()
         if 'current/notice/vacant residents' in line:
             data_start_idx = i + 1
+            logger.info(f"Found data start marker at line {i}")
             break
 
     if data_start_idx == -1:
