@@ -94,7 +94,7 @@ def find_header_and_data_start_excel(df: pd.DataFrame, format_info: dict = None)
 def find_header_and_data_start_csv(file_buffer: io.BytesIO, format_info: dict = None) -> Tuple[int, int, List[str]]:
     """
     Identifies header rows and data section in a CSV file.
-    Adapts based on detected format.
+    THIS IS THE ORIGINAL WORKING LOGIC - searches through lines to find headers.
     """
     file_buffer.seek(0)
     lines = file_buffer.readlines()
@@ -102,40 +102,28 @@ def find_header_and_data_start_csv(file_buffer: io.BytesIO, format_info: dict = 
 
     header_start_idx = -1
     data_start_idx = -1
-    
-    # Use format-specific markers if available
-    if format_info and format_info.get('profile'):
-        profile = format_info['profile']
-    else:
-        profile = DEFAULT_FORMAT_PROFILE
-    
-    section_markers = profile['section_markers']
-    has_two_row_header = profile.get('has_two_row_header', True)
 
-    # Find header row using the ORIGINAL WORKING LOGIC
+    # ORIGINAL LOGIC: Find the line containing "Unit,Unit Type,Unit,Resident..."
     for i, line_bytes in enumerate(lines):
         line = line_bytes.decode('utf-8', errors='ignore').strip()
-        line_lower = line.lower()
-        
-        # Original working condition - look for CSV fields with commas
-        if all(keyword in line_lower for keyword in ['unit,', 'unit type,', 'resident,']):
+        # Check for the exact pattern that worked before
+        if all(keyword in line.lower() for keyword in ['unit,', 'unit type,', 'resident,']):
             header_start_idx = i
             break
 
     if header_start_idx == -1:
-        raise ValueError("Could not find the primary header row in the CSV file.")
+        raise ValueError("Could not find the primary header row in the file.")
 
-    # Parse two header rows (original working logic)
+    # ORIGINAL LOGIC: The header is composed of two lines
     header1 = lines[header_start_idx].decode('utf-8', errors='ignore').strip().split(',')
-    header2 = []
-    if header_start_idx + 1 < len(lines):
-        header2 = lines[header_start_idx + 1].decode('utf-8', errors='ignore').strip().split(',')
+    header2 = lines[header_start_idx + 1].decode('utf-8', errors='ignore').strip().split(',') if header_start_idx + 1 < len(lines) else []
 
-    # Combine headers (original working logic)
+    # ORIGINAL LOGIC: Combine the two header lines into one
     combined_header = []
     for i in range(len(header1)):
         h1 = header1[i].strip()
         h2 = header2[i].strip() if i < len(header2) else ''
+        # Combine if h1 is a primary field, otherwise use h2 if it's more specific
         if h1 and h2:
             combined_header.append(f"{h1} {h2}".strip())
         elif h1:
@@ -143,15 +131,15 @@ def find_header_and_data_start_csv(file_buffer: io.BytesIO, format_info: dict = 
         else:
             combined_header.append(h2)
 
-    # Find data start (using config section markers, but with original search logic)
+    # ORIGINAL LOGIC: Data starts after the "Current/Notice/Vacant Residents" line
     for i in range(header_start_idx + 2, len(lines)):
         line = lines[i].decode('utf-8', errors='ignore').strip().lower()
-        if 'current/notice/vacant residents' in line:  # Exact Yardi marker
+        if 'current/notice/vacant residents' in line:
             data_start_idx = i + 1
             break
 
     if data_start_idx == -1:
-        # If no section marker, assume data starts after headers
+        # Fallback if marker not found
         data_start_idx = header_start_idx + 2
         logger.warning("No section marker found, assuming data starts after headers")
 
