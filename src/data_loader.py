@@ -7,6 +7,7 @@ Adapts parsing based on detected format.
 import pandas as pd
 import io
 import logging
+import csv
 from typing import List, Tuple
 from src.format_detector import detect_format, get_date_parser
 from src.config import FORMAT_PROFILES, DATA_END_MARKERS, DEFAULT_FORMAT_PROFILE
@@ -108,51 +109,53 @@ def find_header_and_data_start_csv(file_buffer: io.BytesIO, format_info: dict = 
     else:
         profile = DEFAULT_FORMAT_PROFILE
     
-    header_markers = profile['header_markers']
     section_markers = profile['section_markers']
     has_two_row_header = profile.get('has_two_row_header', True)
 
-    # Find header row
+    # Find header row using the ORIGINAL WORKING LOGIC
     for i, line_bytes in enumerate(lines):
-        line = line_bytes.decode('utf-8', errors='ignore').strip().lower()
-        if any(all(keyword in line for keyword in marker.split(',')) for marker in header_markers):
+        line = line_bytes.decode('utf-8', errors='ignore').strip()
+        line_lower = line.lower()
+        
+        # Original working condition - look for CSV fields with commas
+        if all(keyword in line_lower for keyword in ['unit,', 'unit type,', 'resident,']):
             header_start_idx = i
             break
 
     if header_start_idx == -1:
         raise ValueError("Could not find the primary header row in the CSV file.")
 
-    # Parse headers based on format
+    # Parse two header rows (original working logic)
     header1 = lines[header_start_idx].decode('utf-8', errors='ignore').strip().split(',')
-    
-    if has_two_row_header and header_start_idx + 1 < len(lines):
+    header2 = []
+    if header_start_idx + 1 < len(lines):
         header2 = lines[header_start_idx + 1].decode('utf-8', errors='ignore').strip().split(',')
-        combined_header = []
-        for i in range(len(header1)):
-            h1 = header1[i].strip()
-            h2 = header2[i].strip() if i < len(header2) else ''
-            if h1 and h2:
-                combined_header.append(f"{h1} {h2}".strip())
-            elif h1:
-                combined_header.append(h1)
-            else:
-                combined_header.append(h2)
-    else:
-        combined_header = [h.strip() for h in header1]
 
-    # Find data start (after section marker)
-    data_start_search = header_start_idx + (2 if has_two_row_header else 1)
-    
-    for i in range(data_start_search, len(lines)):
+    # Combine headers (original working logic)
+    combined_header = []
+    for i in range(len(header1)):
+        h1 = header1[i].strip()
+        h2 = header2[i].strip() if i < len(header2) else ''
+        if h1 and h2:
+            combined_header.append(f"{h1} {h2}".strip())
+        elif h1:
+            combined_header.append(h1)
+        else:
+            combined_header.append(h2)
+
+    # Find data start (using config section markers, but with original search logic)
+    for i in range(header_start_idx + 2, len(lines)):
         line = lines[i].decode('utf-8', errors='ignore').strip().lower()
-        if any(marker in line for marker in section_markers):
+        if 'current/notice/vacant residents' in line:  # Exact Yardi marker
             data_start_idx = i + 1
             break
 
     if data_start_idx == -1:
         # If no section marker, assume data starts after headers
-        data_start_idx = data_start_search
+        data_start_idx = header_start_idx + 2
         logger.warning("No section marker found, assuming data starts after headers")
+
+    return header_start_idx, data_start_idx, combined_header
 
     return header_start_idx, data_start_idx, combined_header
 
