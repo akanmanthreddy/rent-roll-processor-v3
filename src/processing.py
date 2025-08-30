@@ -68,12 +68,31 @@ def process_rent_roll_vectorized(df: pd.DataFrame) -> pd.DataFrame:
     
     logger.info(f"Starting processing with {len(df)} rows")
     
-    # Forward-fill primary record information (but NOT move_out date)
-    # Move-out is tenant-specific and shouldn't be carried forward
+    # Forward-fill primary record information (but NOT move_out date or dates for vacant units)
+    # Only forward-fill within the same resident's records
     cols_to_ffill = [col for col in PRIMARY_RECORD_COLS if col in df.columns and col != 'move_out']
-    if cols_to_ffill:
-        df[cols_to_ffill] = df[cols_to_ffill].ffill()
-        logger.info(f"Forward-filled {len(cols_to_ffill)} columns (excluding move_out)")
+    
+    # Create a group identifier based on unit and resident to prevent forward-fill across different tenants
+    if 'resident_name' in df.columns:
+        # Create groups where forward-fill should stop at boundaries
+        # When resident_name changes (including to/from null), start a new group
+        df['fill_group'] = (df['unit'] + '_' + df['resident_name'].fillna('VACANT')).ne(
+            (df['unit'] + '_' + df['resident_name'].fillna('VACANT')).shift()).cumsum()
+        
+        # Forward-fill only within each group
+        if cols_to_ffill:
+            df[cols_to_ffill] = df.groupby('fill_group')[cols_to_ffill].ffill()
+            logger.info(f"Forward-filled {len(cols_to_ffill)} columns within tenant groups")
+        
+        # Drop the temporary column
+        df = df.drop('fill_group', axis=1)
+    else:
+        # If no resident_name column, use original logic but exclude date columns for safety
+        date_cols = ['move_in', 'lease_expiration']
+        cols_to_ffill = [col for col in cols_to_ffill if col not in date_cols]
+        if cols_to_ffill:
+            df[cols_to_ffill] = df[cols_to_ffill].ffill()
+            logger.info(f"Forward-filled {len(cols_to_ffill)} columns (excluding dates)")
     
     # Keep track of all primary columns for later (including move_out)
     available_primary_cols = [col for col in PRIMARY_RECORD_COLS if col in df.columns]
