@@ -165,13 +165,33 @@ def normalize_column_names(df: pd.DataFrame, format_info: dict = None) -> pd.Dat
     # First, lowercase and clean all column names
     df.columns = [col.lower().strip().replace(' ', '_') for col in df.columns]
     
+    # Log the columns before mapping
+    logger.info(f"Columns before normalization: {list(df.columns)[:10]}")
+    
     # Apply format-specific mappings if available
     if format_info and format_info.get('profile') and 'column_mappings' in format_info['profile']:
         mapping = format_info['profile']['column_mappings']
-        df = df.rename(columns=mapping)
+        # Only rename columns that exist
+        mapping_to_apply = {k: v for k, v in mapping.items() if k in df.columns}
+        if mapping_to_apply:
+            df = df.rename(columns=mapping_to_apply)
+            logger.info(f"Applied column mappings: {mapping_to_apply}")
     else:
         # Apply default mappings
         df = df.rename(columns={'unit_sq_ft': 'sq_ft', 'unit_sqft': 'sq_ft'})
+    
+    # Log the columns after mapping
+    logger.info(f"Columns after normalization: {list(df.columns)[:10]}")
+    
+    # Ensure 'unit' column exists (critical column)
+    if 'unit' not in df.columns:
+        # Check if there's a column that might be 'unit' with different name
+        possible_unit_cols = [col for col in df.columns if 'unit' in col.lower() or 'apt' in col.lower() or 'apartment' in col.lower()]
+        if possible_unit_cols:
+            logger.warning(f"'unit' column not found, but found similar: {possible_unit_cols}. Using first match.")
+            df = df.rename(columns={possible_unit_cols[0]: 'unit'})
+        else:
+            logger.error(f"No 'unit' column found. Available columns: {list(df.columns)}")
     
     return df
 
