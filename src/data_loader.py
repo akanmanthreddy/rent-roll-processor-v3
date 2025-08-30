@@ -202,24 +202,33 @@ def load_and_prepare_dataframe(file_buffer: io.BytesIO, filename: str) -> pd.Dat
     """
     file_extension = filename.lower().split('.')[-1] if '.' in filename else ''
     
-    # Detect format first
-    file_buffer.seek(0)
-    sample_content = file_buffer.read(10000).decode('utf-8', errors='ignore')
-    file_buffer.seek(0)
-    
-    format_info = detect_format(
-        file_content=sample_content,
-        filename=filename
-    )
-    
-    logger.info(f"Using format profile: {format_info['format']} (confidence: {format_info['confidence']}%)")
-    
     if file_extension in ['xlsx', 'xls']:
         logger.info("Processing Excel file")
+        # For Excel, read first then detect format from the actual data
         df = pd.read_excel(file_buffer, header=None, engine='openpyxl')
+        
+        # Now detect format from the Excel DataFrame
+        format_info = detect_format(
+            df=df,
+            filename=filename
+        )
+        
+        logger.info(f"Using format profile: {format_info['format']} (confidence: {format_info['confidence']}%)")
         return find_header_and_data_start_excel(df, format_info)
     else:
         logger.info("Processing CSV file")
+        # For CSV, we can read a sample for format detection
+        file_buffer.seek(0)
+        sample_content = file_buffer.read(10000).decode('utf-8', errors='ignore')
+        file_buffer.seek(0)
+        
+        format_info = detect_format(
+            file_content=sample_content,
+            filename=filename
+        )
+        
+        logger.info(f"Using format profile: {format_info['format']} (confidence: {format_info['confidence']}%)")
+        
         header_start_idx, data_start_idx, combined_header = find_header_and_data_start_csv(file_buffer, format_info)
         
         # Find data end (before summary sections)
