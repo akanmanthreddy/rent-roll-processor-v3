@@ -6,52 +6,9 @@ Identifies the source system and applies appropriate parsing rules.
 import pandas as pd
 import logging
 from typing import Dict, Any, Optional
+from src.config import FORMAT_PROFILES, DETECTION_WEIGHTS, MIN_DETECTION_SCORE
 
 logger = logging.getLogger(__name__)
-
-# Format profiles for different property management systems
-FORMAT_PROFILES = {
-    'yardi': {
-        'identifiers': ['yardi', 'voyager', 'rent roll report', 'resident ar'],
-        'header_markers': ['unit', 'unit type', 'resident'],
-        'section_markers': ['current/notice/vacant residents', 'current residents'],
-        'date_format': '%m/%d/%Y',
-        'currency_format': 'parentheses',  # Negatives shown as (100)
-        'has_subtotals': True
-    },
-    'realpage': {
-        'identifiers': ['realpage', 'onesite', 'site name', 'property summary'],
-        'header_markers': ['unit', 'resident', 'lease'],
-        'section_markers': ['resident list', 'current residents'],
-        'date_format': '%Y-%m-%d',
-        'currency_format': 'minus',  # Negatives shown as -100
-        'has_subtotals': True
-    },
-    'appfolio': {
-        'identifiers': ['appfolio', 'property management', 'rent roll'],
-        'header_markers': ['unit', 'tenant', 'rent'],
-        'section_markers': ['occupied units', 'vacant units'],
-        'date_format': '%m/%d/%Y',
-        'currency_format': 'minus',
-        'has_subtotals': False
-    },
-    'entrata': {
-        'identifiers': ['entrata', 'lease summary', 'resident summary'],
-        'header_markers': ['apartment', 'resident', 'lease term'],
-        'section_markers': ['current residents', 'notice residents'],
-        'date_format': '%m/%d/%Y',
-        'currency_format': 'parentheses',
-        'has_subtotals': True
-    },
-    'mri': {
-        'identifiers': ['mri', 'management reports', 'rent roll'],
-        'header_markers': ['unit code', 'tenant name', 'lease from'],
-        'section_markers': ['residential units', 'commercial units'],
-        'date_format': '%d-%b-%Y',
-        'currency_format': 'minus',
-        'has_subtotals': True
-    }
-}
 
 
 def detect_format(file_content: str = None, df: pd.DataFrame = None, filename: str = None) -> Dict[str, Any]:
@@ -97,22 +54,29 @@ def detect_format(file_content: str = None, df: pd.DataFrame = None, filename: s
         score = 0
         markers_found = []
         
-        # Check identifiers (weighted heavily)
-        for identifier in profile['identifiers']:
-            if identifier in search_text:
-                score += 3
-                markers_found.append(identifier)
+        # Check specific patterns FIRST (highest weight - these are most reliable)
+        if 'specific_patterns' in profile:
+            for pattern in profile['specific_patterns']:
+                if pattern in search_text:
+                    score += DETECTION_WEIGHTS['specific_pattern']
+                    markers_found.append(f"pattern: {pattern}")
         
-        # Check header markers
-        for marker in profile['header_markers']:
-            if marker in search_text:
-                score += 1
-                markers_found.append(marker)
-        
-        # Check section markers
+        # Check section markers (format-specific)
         for marker in profile['section_markers']:
             if marker in search_text:
-                score += 2
+                score += DETECTION_WEIGHTS['section_marker']
+                markers_found.append(f"section: {marker}")
+        
+        # Check identifiers (sometimes present)
+        for identifier in profile['identifiers']:
+            if identifier in search_text:
+                score += DETECTION_WEIGHTS['identifier']
+                markers_found.append(identifier)
+        
+        # Check header markers (generic)
+        for marker in profile['header_markers']:
+            if marker in search_text:
+                score += DETECTION_WEIGHTS['header_marker']
                 markers_found.append(marker)
         
         if score > best_score:
@@ -121,7 +85,7 @@ def detect_format(file_content: str = None, df: pd.DataFrame = None, filename: s
             detection_result['detected_markers'] = markers_found
     
     # Set results based on best match
-    if best_match and best_score >= 3:  # Minimum threshold
+    if best_match and best_score >= MIN_DETECTION_SCORE:
         detection_result['format'] = best_match
         detection_result['profile'] = FORMAT_PROFILES[best_match]
         # Calculate confidence (max score would be about 15-20)
@@ -138,7 +102,8 @@ def get_date_parser(format_name: str):
     """
     if format_name in FORMAT_PROFILES:
         date_format = FORMAT_PROFILES[format_name]['date_format']
-        return lambda x: pd.to_datetime(x, format=date_format, errors='coerce')
+        if date_format:
+            return lambda x: pd.to_datetime(x, format=date_format, errors='coerce')
     return lambda x: pd.to_datetime(x, errors='coerce', infer_datetime_format=True)
 
 
