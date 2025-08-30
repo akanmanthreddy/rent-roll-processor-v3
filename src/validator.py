@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 from typing import Dict, List, Any
 import logging
+from src.config import VALIDATION_THRESHOLDS, REQUIRED_COLUMNS
 
 logger = logging.getLogger(__name__)
 
@@ -25,18 +26,19 @@ def validate_rent_roll(df: pd.DataFrame) -> Dict[str, Any]:
         'data_quality_score': 100  # Start at 100, deduct for issues
     }
     
+    penalties = VALIDATION_THRESHOLDS['data_quality_penalties']
+    
     # Check for required columns
-    required_cols = ['unit', 'unit_type', 'sq_ft', 'market_rent']
-    missing_cols = [col for col in required_cols if col not in df.columns]
+    missing_cols = [col for col in REQUIRED_COLUMNS if col not in df.columns]
     if missing_cols:
         validation_results['errors'].append(f"Missing required columns: {', '.join(missing_cols)}")
-        validation_results['data_quality_score'] -= 25
+        validation_results['data_quality_score'] -= penalties['missing_required_columns']
     
     # Check for data completeness
     if 'unit' in df.columns:
         if df['unit'].isna().any():
             validation_results['errors'].append("Some rows have missing unit numbers")
-            validation_results['data_quality_score'] -= 20
+            validation_results['data_quality_score'] -= penalties['missing_unit_numbers']
     
     # Validate numeric fields
     if 'market_rent' in df.columns:
@@ -45,31 +47,34 @@ def validate_rent_roll(df: pd.DataFrame) -> Dict[str, Any]:
             validation_results['warnings'].append(
                 f"Units with negative market rent: {negative_market_rent['unit'].tolist()}"
             )
-            validation_results['data_quality_score'] -= 10
+            validation_results['data_quality_score'] -= penalties['negative_market_rent']
             
-        # Check for unrealistic rents (over $50,000/month)
-        high_rent = df[df['market_rent'] > 50000]
+        # Check for unrealistic rents
+        high_rent = df[df['market_rent'] > VALIDATION_THRESHOLDS['max_reasonable_rent']]
         if not high_rent.empty:
             validation_results['warnings'].append(
-                f"Units with unusually high rent (>$50k): {high_rent['unit'].tolist()}"
+                f"Units with unusually high rent (>${VALIDATION_THRESHOLDS['max_reasonable_rent']}): {high_rent['unit'].tolist()}"
             )
-            validation_results['data_quality_score'] -= 5
+            validation_results['data_quality_score'] -= penalties['unrealistic_values']
     
     # Validate square footage
     if 'sq_ft' in df.columns:
-        # Check for negative or zero sq ft
-        invalid_sqft = df[(df['sq_ft'] <= 0) | (df['sq_ft'].isna())]
+        # Check for invalid sq ft
+        invalid_sqft = df[
+            (df['sq_ft'] < VALIDATION_THRESHOLDS['min_reasonable_sqft']) | 
+            (df['sq_ft'].isna())
+        ]
         if not invalid_sqft.empty:
             validation_results['warnings'].append(
-                f"Units with invalid sq ft: {invalid_sqft['unit'].tolist()}"
+                f"Units with invalid sq ft (<{VALIDATION_THRESHOLDS['min_reasonable_sqft']}): {invalid_sqft['unit'].tolist()}"
             )
-            validation_results['data_quality_score'] -= 10
+            validation_results['data_quality_score'] -= penalties['invalid_sqft']
             
-        # Check for unrealistic sq ft (over 10,000 for residential)
-        huge_units = df[df['sq_ft'] > 10000]
+        # Check for unrealistic sq ft
+        huge_units = df[df['sq_ft'] > VALIDATION_THRESHOLDS['max_reasonable_sqft']]
         if not huge_units.empty:
             validation_results['warnings'].append(
-                f"Units over 10,000 sq ft: {huge_units['unit'].tolist()}"
+                f"Units over {VALIDATION_THRESHOLDS['max_reasonable_sqft']} sq ft: {huge_units['unit'].tolist()}"
             )
     
     # Date validation
@@ -95,7 +100,7 @@ def validate_rent_roll(df: pd.DataFrame) -> Dict[str, Any]:
                     validation_results['errors'].append(
                         f"Units with move-out before move-in: {date_mismatch['unit'].tolist()}"
                     )
-                    validation_results['data_quality_score'] -= 15
+                    validation_results['data_quality_score'] -= penalties['date_mismatch']
     
     # Check for duplicate units
     if 'unit' in df.columns:
@@ -105,7 +110,7 @@ def validate_rent_roll(df: pd.DataFrame) -> Dict[str, Any]:
             validation_results['warnings'].append(
                 f"Duplicate unit numbers found: {dup_units[:10]}..."  # Show first 10
             )
-            validation_results['data_quality_score'] -= 5
+            validation_results['data_quality_score'] -= penalties['duplicate_units']
     
     # Calculate statistics
     if 'occupancy_status' in df.columns:
