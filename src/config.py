@@ -45,10 +45,10 @@ FORMAT_PROFILES = {
         'column_mappings': {
             'unit_sq_ft': 'sq_ft',
             'unit_sqft': 'sq_ft',
-            'resident': 'resident_code',
+            # Don't rename 'unit' - it's already correct
+            # Map name to resident_name if needed
             'name': 'resident_name',
-            'lease_from': 'move_in',
-            'lease_to': 'lease_expiration'
+            'resident': 'resident_code'
         }
     },
     'realpage': {
