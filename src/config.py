@@ -33,10 +33,15 @@ FORMAT_PROFILES = {
         'header_markers': ['unit', 'unit type', 'resident'],
         'section_markers': ['current/notice/vacant residents', 'current residents'],
         'specific_patterns': [
-            'unit,unit type,sq ft,resident,name',
+            'unit,unit type,sq ft,resident,name',  # CSV pattern
+            'unit unit type sq ft resident name',   # Excel pattern (space-separated)
             'current/notice/vacant residents',
+            'current/notice/vacant',  # Shorter version
             'summary groups',
-            'future residents/applicants'
+            'future residents/applicants',
+            'rent roll with lease charges',  # Common Yardi report title
+            'charge code',  # Yardi-specific term
+            'resident deposit'  # Yardi-specific column
         ],
         'date_format': '%m/%d/%Y',
         'currency_format': 'parentheses',
@@ -45,8 +50,6 @@ FORMAT_PROFILES = {
         'column_mappings': {
             'unit_sq_ft': 'sq_ft',
             'unit_sqft': 'sq_ft',
-            # Don't rename 'unit' - it's already correct
-            # Map name to resident_name if needed
             'name': 'resident_name',
             'resident': 'resident_code'
         }
