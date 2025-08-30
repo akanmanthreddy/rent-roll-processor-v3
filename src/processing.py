@@ -53,10 +53,10 @@ def process_rent_roll_vectorized(df: pd.DataFrame) -> pd.DataFrame:
     """
     logger.info(f"Starting processing with {len(df)} rows")
     
-    ffill_cols = [col for col in PRIMARY_RECORD_COLS if col in df.columns]
+    ffill_cols = [col for col in PRIMARY_RECORD_COLS if col in df.columns and col != 'move_out']
     if ffill_cols:
         df[ffill_cols] = df[ffill_cols].ffill()
-        logger.info(f"Forward-filled columns: {ffill_cols}")
+        logger.info(f"Forward-filled {len(ffill_cols)} columns (excluding move_out)")
 
     if 'unit' not in df.columns or 'charge_code' not in df.columns:
         logger.error(f"Missing required columns. Available columns: {list(df.columns)}")
