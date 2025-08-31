@@ -7,7 +7,6 @@ import pandas as pd
 import numpy as np
 from typing import Dict, List, Any
 import logging
-from src.config import VALIDATION_THRESHOLDS, REQUIRED_COLUMNS
 
 logger = logging.getLogger(__name__)
 
