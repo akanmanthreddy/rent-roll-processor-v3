@@ -67,26 +67,39 @@ def process_rent_roll_http(request):
         # Read file into memory
         file_buffer = io.BytesIO(file.read())
         
-        # Detect format if requested
-        format_info = None
-        if detect_format_flag:
-            # Read a bit of the file for format detection
-            file_buffer.seek(0)
-            sample_content = file_buffer.read(10000).decode('utf-8', errors='ignore')
-            file_buffer.seek(0)
-            
-            format_info = detect_format(
-                file_content=sample_content,
-                filename=file.filename
-            )
-            logger.info(f"Detected format: {format_info['format']} (confidence: {format_info['confidence']}%)")
+        # NOTE: Format detection happens INSIDE load_and_prepare_dataframe
+        # We'll get the format info from there, not run it separately
         
-        # Process the file
+        # Process the file (this includes format detection internally)
         raw_df = load_and_prepare_dataframe(file_buffer, file.filename)
         processed_df = process_rent_roll_vectorized(raw_df)
         
         if processed_df.empty:
             return (json.dumps({'error': 'No valid data found after processing'}), 400, headers)
+        
+        # Get format info for the response
+        # Since we want to show what format was detected, we need to run detection again
+        # But this time just for the response, not for processing
+        format_info = None
+        if detect_format_flag:
+            file_extension = file.filename.lower().split('.')[-1] if '.' in file.filename else ''
+            
+            if file_extension in ['xlsx', 'xls']:
+                # For Excel, read the file again for format detection display
+                file_buffer.seek(0)
+                try:
+                    df_for_detection = pd.read_excel(file_buffer, header=None, engine='openpyxl')
+                    format_info = detect_format(df=df_for_detection, filename=file.filename)
+                except:
+                    pass
+            else:
+                # For CSV
+                file_buffer.seek(0)
+                sample_content = file_buffer.read(10000).decode('utf-8', errors='ignore')
+                format_info = detect_format(file_content=sample_content, filename=file.filename)
+            
+            if format_info:
+                logger.info(f"Format for response: {format_info['format']} (confidence: {format_info['confidence']}%)")
         
         # Run validation
         validation_results = validate_rent_roll(processed_df)
@@ -185,115 +198,3 @@ def process_rent_roll_http(request):
     except Exception as e:
         logger.error(f"An unexpected error occurred: {e}", exc_info=True)
         return (json.dumps({'error': 'Internal Server Error', 'details': str(e)}), 500, headers)
-
-
-@functions_framework.http
-def test_format_detection(request):
-    """
-    Test endpoint to debug format detection.
-    Use this to see what the format detector finds in your file.
-    
-    Usage: POST to /test_format_detection with a file
-    Returns detailed debug information about format detection
-    """
-    
-    # Handle CORS
-    if request.method == 'OPTIONS':
-        headers = {
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'POST',
-            'Access-Control-Allow-Headers': 'Content-Type',
-            'Access-Control-Max-Age': '3600'
-        }
-        return ('', 204, headers)
-    
-    headers = {'Access-Control-Allow-Origin': '*'}
-    
-    try:
-        # Check for file
-        if 'file' not in request.files:
-            return (json.dumps({'error': 'No file provided'}), 400, headers)
-        
-        file = request.files['file']
-        if file.filename == '':
-            return (json.dumps({'error': 'No file selected'}), 400, headers)
-        
-        logger.info(f"Testing format detection for: {file.filename}")
-        
-        # Read file
-        file_buffer = io.BytesIO(file.read())
-        
-        # Initialize result
-        result = {
-            'filename': file.filename,
-            'file_type': 'excel' if file.filename.endswith(('.xlsx', '.xls')) else 'csv'
-        }
-        
-        # Process based on file type
-        if file.filename.endswith(('.xlsx', '.xls')):
-            # Excel file
-            df = pd.read_excel(file_buffer, header=None, engine='openpyxl')
-            
-            # Add DataFrame info
-            result['dataframe_info'] = {
-                'rows': len(df),
-                'columns': len(df.columns),
-                'first_10_rows': []
-            }
-            
-            # Add first 10 rows (sanitized)
-            for idx in range(min(10, len(df))):
-                row_data = []
-                for val in df.iloc[idx].values[:10]:  # First 10 columns only
-                    if pd.notna(val):
-                        # Convert to string and truncate if needed
-                        val_str = str(val)[:50]
-                        row_data.append(val_str)
-                result['dataframe_info']['first_10_rows'].append({
-                    'row_index': idx,
-                    'values': row_data
-                })
-            
-            # Run format detection with debug
-            format_info = detect_format(df=df, filename=file.filename, debug=True)
-            
-        else:
-            # CSV file
-            file_buffer.seek(0)
-            sample = file_buffer.read(10000).decode('utf-8', errors='ignore')
-            
-            # Add sample info
-            result['sample_info'] = {
-                'sample_length': len(sample),
-                'first_10_lines': sample.split('\n')[:10]
-            }
-            
-            # Run format detection with debug
-            format_info = detect_format(file_content=sample, filename=file.filename, debug=True)
-        
-        # Add format detection results
-        result['detection_result'] = {
-            'detected_format': format_info['format'],
-            'confidence': format_info['confidence'],
-            'detected_markers': format_info.get('detected_markers', [])
-        }
-        
-        # Add debug info if available
-        if format_info.get('debug_info'):
-            debug = format_info['debug_info']
-            result['debug_details'] = {
-                'best_match': debug.get('best_match'),
-                'best_score': debug.get('best_score'),
-                'all_format_scores': debug.get('formats_checked', {}),
-                'patterns_found': debug.get('patterns_found', [])[:10]  # First 10 patterns
-            }
-        
-        # Return results
-        response = make_response(json.dumps(result, indent=2, default=str))
-        response.headers['Content-Type'] = 'application/json; charset=utf-8'
-        response.headers.update(headers)
-        return response
-        
-    except Exception as e:
-        logger.error(f"Error in format detection test: {e}", exc_info=True)
-        return (json.dumps({'error': str(e)}), 500, headers)
