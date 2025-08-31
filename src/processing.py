@@ -1,6 +1,6 @@
 """
 Processing module for rent roll data - Fixed charge aggregation for Yardi.
-Properly handles multiple rows per unit with different charge codes.
+Based on working version approach.
 """
 
 import pandas as pd
@@ -32,7 +32,7 @@ def clean_and_convert_to_numeric(series: pd.Series) -> pd.Series:
 def process_rent_roll_vectorized(df: pd.DataFrame) -> pd.DataFrame:
     """
     Main processing function for Yardi rent roll data.
-    Properly handles multi-row structure where each unit has multiple charge rows.
+    Fixed to properly handle multi-row structure where each unit has multiple charge rows.
     """
     if df.empty:
         logger.warning("Received empty DataFrame")
@@ -49,15 +49,19 @@ def process_rent_roll_vectorized(df: pd.DataFrame) -> pd.DataFrame:
         else:
             raise ValueError("Required column 'unit' not found")
     
-    # Clean unit column
+    # Convert unit to string first
     df['unit'] = df['unit'].astype(str).str.strip()
     
-    # Remove invalid units
-    invalid_units = ['nan', 'NaN', 'NAN', 'null', 'NULL', 'None', 'NONE', '', ' ']
-    df = df[~df['unit'].isin(invalid_units)]
-    df = df[df['unit'].notna()]
+    # CRITICAL: Forward-fill unit column FIRST before any filtering
+    # In Yardi format, unit appears only on first row, subsequent charge rows are empty
+    df['unit'] = df['unit'].replace(['nan', 'NaN', 'NAN', 'null', 'NULL', 'None', 'NONE', ''], np.nan)
+    df['unit'] = df['unit'].ffill()
     
-    # Remove separator/total rows
+    # Now remove rows with invalid units (after forward-fill)
+    df = df[df['unit'].notna()]
+    df = df[~df['unit'].str.contains(',,,,,', na=False, regex=False)]  # Remove separator rows
+    
+    # Remove total/summary rows
     for pattern in FILTER_PATTERNS:
         if ',' in pattern:
             df = df[~df['unit'].str.contains(pattern, na=False, regex=False)]
@@ -66,30 +70,36 @@ def process_rent_roll_vectorized(df: pd.DataFrame) -> pd.DataFrame:
     
     logger.info(f"After cleaning, {len(df)} rows remain")
     
-    # CRITICAL FIX: Forward fill unit information INCLUDING 'unit' column
-    # But NOT 'amount' or 'charge_code' to preserve the actual charge values
-    unit_info_cols = ['unit', 'unit_type', 'sq_ft', 'resident_code', 'resident_name',
-                      'market_rent', 'resident_deposit', 'other_deposit', 
-                      'move_in', 'lease_expiration', 'move_out', 'balance']
+    # Now forward-fill other unit information columns within each unit
+    # BUT NOT charge_code or amount
+    cols_to_ffill = ['unit_type', 'sq_ft', 'resident_code', 'resident_name',
+                     'market_rent', 'resident_deposit', 'other_deposit', 
+                     'move_in', 'lease_expiration', 'balance']
     
-    # First, we need to identify unit groups before forward-filling 'unit'
-    # Create a unit group identifier based on where unit values appear
-    df['unit_group'] = df['unit'].notna().cumsum()
+    # Only forward-fill columns that exist
+    cols_to_ffill = [col for col in cols_to_ffill if col in df.columns]
     
-    # Now forward fill within each unit group
-    for col in unit_info_cols:
-        if col in df.columns:
-            df[col] = df.groupby('unit_group')[col].ffill()
+    # Create fill groups based on unit + resident to avoid forward-filling across different tenants
+    if 'resident_name' in df.columns:
+        df['fill_group'] = (df['unit'] + '_' + df['resident_name'].fillna('VACANT')).ne(
+            (df['unit'] + '_' + df['resident_name'].fillna('VACANT')).shift()).cumsum()
+        
+        # Forward-fill within each group
+        if cols_to_ffill:
+            df[cols_to_ffill] = df.groupby('fill_group')[cols_to_ffill].ffill()
+        
+        df = df.drop('fill_group', axis=1)
+    else:
+        # Simple forward-fill if no resident_name
+        if cols_to_ffill:
+            df[cols_to_ffill] = df.groupby('unit')[cols_to_ffill].ffill()
     
-    # Drop the temporary unit_group column
-    df = df.drop('unit_group', axis=1)
+    logger.info("Forward-filled unit information within groups")
     
-    logger.info("Forward-filled unit information within groups (preserving charge amounts)")
-    
-    # Log sample of data to verify amounts are preserved
-    if 'charge_code' in df.columns and 'amount' in df.columns:
-        sample_charges = df[df['charge_code'].notna()][['unit', 'charge_code', 'amount']].head(20)
-        logger.info(f"Sample charge data after forward-fill:\n{sample_charges}")
+    # Don't forward-fill move_out (as per config)
+    if 'move_out' in df.columns:
+        # move_out should only apply to specific records, not forward-filled
+        pass
     
     # Convert date columns
     date_cols = ['move_in', 'move_out', 'lease_expiration']
@@ -97,71 +107,49 @@ def process_rent_roll_vectorized(df: pd.DataFrame) -> pd.DataFrame:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors='coerce')
     
-    # Clean numeric columns EXCEPT charge_code and amount initially
-    # We'll handle amount specially to preserve the values
+    # Clean numeric columns (but preserve amount values!)
     numeric_cols = ['market_rent', 'sq_ft', 'resident_deposit', 'other_deposit', 'balance']
     for col in numeric_cols:
         if col in df.columns:
             df[col] = clean_and_convert_to_numeric(df[col])
     
-    # Now handle amount column carefully
+    # Clean amount column separately and carefully
     if 'amount' in df.columns:
         df['amount'] = clean_and_convert_to_numeric(df['amount'])
-        logger.info(f"Amount column stats - Non-null: {df['amount'].notna().sum()}, Non-zero: {(df['amount'] != 0).sum()}")
+        logger.info(f"Amount column - Non-null: {df['amount'].notna().sum()}, Non-zero: {(df['amount'] != 0).sum()}")
     
-    # Now process charges
+    # Get ALL unique units first (including vacant)
+    available_primary_cols = [col for col in PRIMARY_RECORD_COLS if col in df.columns]
+    all_units = df.drop_duplicates(subset=['unit'], keep='first')
+    unit_info = all_units[available_primary_cols].copy()
+    logger.info(f"Found {len(unit_info)} unique units (including vacant)")
+    
+    # Now process charges if they exist
     if 'charge_code' in df.columns and 'amount' in df.columns:
         logger.info("Processing charges...")
         
         # Clean charge codes
         df['charge_code'] = df['charge_code'].astype(str).str.strip().str.lower()
         
-        # Replace 'nan' strings with actual NaN
-        df.loc[df['charge_code'].isin(['nan', 'null', 'none', '']), 'charge_code'] = pd.NA
+        # Filter for rows with valid charge codes
+        charge_rows = df[df['charge_code'].notna()].copy()
+        charge_rows = charge_rows[~charge_rows['charge_code'].isin(['nan', 'null', 'none', ''])]
         
-        # Log charge distribution before filtering
-        charge_df_analysis = df[df['charge_code'].notna()].copy()
-        if not charge_df_analysis.empty:
-            charge_summary = charge_df_analysis.groupby('charge_code')['amount'].agg(['count', 'sum', 'mean'])
-            logger.info(f"Charge summary before pivoting:\n{charge_summary}")
+        # Remove total/summary rows
+        charge_rows = charge_rows[~charge_rows['charge_code'].str.contains('total|summary', na=False)]
         
-        # Get unique unit information (one row per unit)
-        unit_cols = ['unit', 'unit_type', 'sq_ft', 'resident_code', 'resident_name',
-                     'market_rent', 'resident_deposit', 'other_deposit',
-                     'move_in', 'lease_expiration', 'move_out', 'balance']
+        logger.info(f"Found {len(charge_rows)} rows with charges")
         
-        available_unit_cols = [col for col in unit_cols if col in df.columns]
+        # Only keep rows with non-null amounts for pivoting
+        charge_rows = charge_rows[charge_rows['amount'].notna()]
         
-        # Get unique units with their info (from first row of each unit)
-        units_df = df[available_unit_cols].drop_duplicates(subset=['unit'], keep='first')
-        logger.info(f"Found {len(units_df)} unique units")
-        
-        # Process charges - only include rows with valid charge codes AND non-zero amounts
-        # Based on your insight: if a charge appears, it should have a value
-        charge_df = df[
-            df['charge_code'].notna() & 
-            df['amount'].notna() & 
-            (df['amount'] != 0)
-        ].copy()
-        
-        logger.info(f"Found {len(charge_df)} charge rows with non-zero amounts")
-        
-        # Also log any charge rows that have 0 amounts (these might be data issues)
-        zero_amount_charges = df[
-            df['charge_code'].notna() & 
-            ((df['amount'] == 0) | df['amount'].isna())
-        ]
-        if not zero_amount_charges.empty:
-            logger.warning(f"Found {len(zero_amount_charges)} charge rows with 0 or null amounts - these are being excluded")
-            logger.warning(f"Sample of excluded charges: {zero_amount_charges[['unit', 'charge_code', 'amount']].head(10)}")
-        
-        # Pivot charges if we have any
-        if not charge_df.empty:
-            # Remove any charge codes that look like totals
-            charge_df = charge_df[~charge_df['charge_code'].str.contains('total|summary', na=False)]
+        if not charge_rows.empty:
+            # Log charge distribution
+            charge_summary = charge_rows.groupby('charge_code')['amount'].agg(['count', 'sum', 'mean'])
+            logger.info(f"Charge distribution:\n{charge_summary}")
             
-            # Pivot charges - sum amounts for duplicate charge codes per unit
-            pivot_df = charge_df.pivot_table(
+            # Pivot charge codes into columns
+            pivot_df = charge_rows.pivot_table(
                 index='unit',
                 columns='charge_code',
                 values='amount',
@@ -169,37 +157,30 @@ def process_rent_roll_vectorized(df: pd.DataFrame) -> pd.DataFrame:
                 fill_value=0
             ).reset_index()
             
-            logger.info(f"Pivoted charges: {len(pivot_df)} units, {len(pivot_df.columns)-1} charge types")
+            logger.info(f"Created pivot table: {len(pivot_df)} units, {len(pivot_df.columns)-1} charge types")
+            logger.info(f"Charge columns: {list(pivot_df.columns)}")
             
-            # Log detailed statistics for each charge type
-            charge_stats = []
-            for col in pivot_df.columns:
-                if col != 'unit':
-                    non_zero = (pivot_df[col] != 0).sum()
-                    if non_zero > 0:  # Only log charges that have non-zero values
-                        total = pivot_df[col].sum()
-                        avg = pivot_df[col][pivot_df[col] > 0].mean() if non_zero > 0 else 0
-                        charge_stats.append(f"  {col}: {non_zero} units, total: ${total:,.2f}, avg: ${avg:,.2f}")
-            
-            logger.info("Charge statistics (non-zero only):")
-            for stat in charge_stats:
-                logger.info(stat)
-            
-            # Merge unit info with charges
-            final_df = pd.merge(units_df, pivot_df, on='unit', how='left')
-            
-            # Fill NaN values in charge columns with 0
-            charge_columns = [col for col in pivot_df.columns if col != 'unit']
-            for col in charge_columns:
-                final_df[col] = final_df[col].fillna(0)
+            # Check specific charge columns
+            if 'rent' in pivot_df.columns:
+                rent_stats = pivot_df['rent'].describe()
+                logger.info(f"Rent statistics:\n{rent_stats}")
+                logger.info(f"Units with rent > 0: {(pivot_df['rent'] > 0).sum()}")
         else:
-            logger.warning("No valid charges found to pivot (all amounts were 0 or null)")
-            final_df = units_df.copy()
+            logger.warning("No valid charges found to pivot")
+            pivot_df = pd.DataFrame({'unit': unit_info['unit'].unique()})
     else:
-        logger.warning("No charge_code or amount column found")
-        # Just get unique units
-        unit_cols = [col for col in df.columns if col != 'charge_code' and col != 'amount']
-        final_df = df[unit_cols].drop_duplicates(subset=['unit'], keep='first')
+        logger.warning("No charge_code or amount columns found")
+        pivot_df = pd.DataFrame({'unit': unit_info['unit'].unique()})
+    
+    # Merge ALL unit information with the pivot table
+    # This ensures vacant units are included even if they have no charges
+    final_df = pd.merge(unit_info, pivot_df, on='unit', how='left')
+    
+    # Fill NaN values in charge columns with 0
+    charge_columns = [col for col in final_df.columns if col not in available_primary_cols]
+    for col in charge_columns:
+        if col in final_df.columns:
+            final_df[col] = final_df[col].fillna(0)
     
     # Add occupancy status
     if 'resident_name' in final_df.columns:
@@ -217,23 +198,51 @@ def process_rent_roll_vectorized(df: pd.DataFrame) -> pd.DataFrame:
             else 'Occupied'
         )
     
-    # Create actual_rent column (if rent charge exists)
+    # Create actual_rent column
     if 'rent' in final_df.columns:
         final_df['actual_rent'] = final_df['rent']
-        occupied_with_rent = ((final_df['occupancy_status'] == 'Occupied') & (final_df['rent'] > 0)).sum()
-        occupied_total = (final_df['occupancy_status'] == 'Occupied').sum()
-        logger.info(f"Rent check: {occupied_with_rent}/{occupied_total} occupied units have rent > 0")
+        if 'occupancy_status' in final_df.columns:
+            occupied_with_rent = ((final_df['occupancy_status'] == 'Occupied') & (final_df['rent'] > 0)).sum()
+            occupied_total = (final_df['occupancy_status'] == 'Occupied').sum()
+            logger.info(f"Rent check: {occupied_with_rent}/{occupied_total} occupied units have rent > 0")
     else:
-        # If no rent column from charges, use 0 or market_rent as fallback
         final_df['actual_rent'] = 0
-        logger.info("No 'rent' charge found, setting actual_rent to 0")
     
-    # Log final statistics
-    logger.info(f"Final result: {len(final_df)} units, {len(final_df.columns)} columns")
+    # Final logging
+    logger.info(f"Processing complete: {len(final_df)} units, {len(final_df.columns)} columns")
     
-    # Log summary of which charge columns made it to the final output
-    charge_cols_in_output = [col for col in final_df.columns if col not in available_unit_cols and col not in ['occupancy_status', 'actual_rent']]
-    if charge_cols_in_output:
-        logger.info(f"Charge columns in final output: {charge_cols_in_output}")
+    if 'occupancy_status' in final_df.columns:
+        vacant_count = (final_df['occupancy_status'] == 'Vacant').sum()
+        occupied_count = (final_df['occupancy_status'] == 'Occupied').sum()
+        logger.info(f"Units: {occupied_count} occupied, {vacant_count} vacant")
+    
+    # Log charge column statistics
+    charge_cols = [c for c in final_df.columns if c not in available_primary_cols + ['occupancy_status', 'actual_rent']]
+    if charge_cols:
+        logger.info(f"Charge columns in output: {charge_cols}")
+        for col in charge_cols[:10]:  # Log first 10 charge types
+            non_zero = (final_df[col] != 0).sum()
+            if non_zero > 0:
+                logger.info(f"  {col}: {non_zero} non-zero values, total=${final_df[col].sum():,.2f}")
     
     return final_df
+
+
+def optimize_memory_usage(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Optimizes DataFrame memory by downcasting types.
+    """
+    initial_memory = df.memory_usage(deep=True).sum() / 1024**2
+    
+    for col in df.select_dtypes(include=['int64', 'float64']).columns:
+        df[col] = pd.to_numeric(df[col], downcast='integer', errors='ignore')
+        df[col] = pd.to_numeric(df[col], downcast='float', errors='ignore')
+
+    for col in df.select_dtypes(include=['object']).columns:
+        if df[col].nunique() / len(df[col]) < 0.5:
+            df[col] = df[col].astype('category')
+
+    final_memory = df.memory_usage(deep=True).sum() / 1024**2
+    logger.info(f"Memory optimized: {initial_memory:.2f}MB → {final_memory:.2f}MB")
+    
+    return df
